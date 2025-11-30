@@ -1,5 +1,6 @@
 <?php
 session_start();
+ob_start(); // Start output buffering to prevent header issues
 include "config.php";
 
 $email_error = false;
@@ -21,29 +22,61 @@ if (isset($_POST['login'])) {
         $error = "Password is required.";
         $password_error = true;
     } else {
-        // Fetch user by email
-        $query = "SELECT * FROM users WHERE email = '$email' LIMIT 1";
-        $result = mysqli_query($conn, $query);
+        // Use prepared statement to prevent SQL injection
+        $stmt = mysqli_prepare($conn, "SELECT id, name, email, password, role FROM users WHERE email = ? LIMIT 1");
+        
+        if ($stmt) {
+            mysqli_stmt_bind_param($stmt, "s", $email);
+            mysqli_stmt_execute($stmt);
+            $result = mysqli_stmt_get_result($stmt);
 
-        if (mysqli_num_rows($result) === 1) {
-            $user = mysqli_fetch_assoc($result);
+            if (mysqli_num_rows($result) === 1) {
+                $user = mysqli_fetch_assoc($result);
 
-            // Check hashed password
-            if (password_verify($password, $user['password'])) {
-                // Save session values
-                $_SESSION['user_id'] = $user['id'];
-                $_SESSION['user_name'] = $user['name'];
-                $_SESSION['user_role'] = $user['role'];
+                // Check password (supports both hashed and plain text for migration)
+                $password_valid = false;
+                
+                // Check if password is hashed (starts with $2y$ or similar)
+                if (password_get_info($user['password'])['algoName'] !== 'unknown') {
+                    // Password is hashed, use password_verify
+                    $password_valid = password_verify($password, $user['password']);
+                } else {
+                    // Password is plain text, compare directly
+                    $password_valid = ($password === $user['password']);
+                    
+                    // If login successful with plain text, hash it for future use
+                    if ($password_valid) {
+                        $hashed_password = password_hash($password, PASSWORD_DEFAULT);
+                        $update_stmt = mysqli_prepare($conn, "UPDATE users SET password = ? WHERE id = ?");
+                        if ($update_stmt) {
+                            mysqli_stmt_bind_param($update_stmt, "si", $hashed_password, $user['id']);
+                            mysqli_stmt_execute($update_stmt);
+                            mysqli_stmt_close($update_stmt);
+                        }
+                    }
+                }
 
-                header("Location: dashboard.php");
-                exit();
+                if ($password_valid) {
+                    // Save session values
+                    $_SESSION['user_id'] = $user['id'];
+                    $_SESSION['user_name'] = $user['name'];
+                    $_SESSION['user_role'] = $user['role'];
+
+                    mysqli_stmt_close($stmt);
+                    ob_end_clean(); // Clear output buffer before redirect
+                    header("Location: dashboard.php");
+                    exit();
+                } else {
+                    $error = "Incorrect password.";
+                    $password_error = true;
+                }
             } else {
-                $error = "Incorrect password.";
-                $password_error = true;
+                $error = "Email not found.";
+                $email_error = true;
             }
+            mysqli_stmt_close($stmt);
         } else {
-            $error = "Email not found.";
-            $email_error = true;
+            $error = "Database error. Please try again.";
         }
     }
 }
@@ -85,6 +118,9 @@ if (isset($_POST['login'])) {
                     <div class="input-wrapper <?php echo $password_error ? 'error' : ''; ?>">
                         <span class="input-icon">🔒</span>
                         <input type="password" id="password" name="password" placeholder="Password" required autocomplete="current-password">
+                        <button type="button" class="toggle-password" id="togglePassword" aria-label="Show password">
+                            <span class="eye-icon">👁️</span>
+                        </button>
                     </div>
                 </div>
                 
@@ -162,6 +198,25 @@ if (isset($_POST['login'])) {
                     const wrapper = this.closest('.input-wrapper');
                     if (this.value) {
                         wrapper.classList.remove('error');
+                    }
+                });
+                
+                // Password visibility toggle
+                const togglePassword = document.getElementById('togglePassword');
+                const passwordInput = document.getElementById('password');
+                const eyeIcon = togglePassword.querySelector('.eye-icon');
+                
+                togglePassword.addEventListener('click', function() {
+                    const type = passwordInput.getAttribute('type') === 'password' ? 'text' : 'password';
+                    passwordInput.setAttribute('type', type);
+                    
+                    // Change icon
+                    if (type === 'text') {
+                        eyeIcon.textContent = '🙈';
+                        togglePassword.setAttribute('aria-label', 'Hide password');
+                    } else {
+                        eyeIcon.textContent = '👁️';
+                        togglePassword.setAttribute('aria-label', 'Show password');
                     }
                 });
             </script>
